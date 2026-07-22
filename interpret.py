@@ -2,177 +2,279 @@
 """
 interpret.py
 
-Purpose
--------
 Create first-pass structural and biological interpretations from
-annotated harmonized junctions and clusters.
-
-Version 1 event classes
------------------------
-Junction-driven:
-- fusion_candidate
-- exon_disruption
-- promoter_hijack_candidate
-- enhancer_hijack_candidate
-- interchromosomal_rearrangement
-
-Cluster-driven:
-- complex_rearrangement_cluster
-- chromothripsis_like_cluster
-
-Important note
---------------
-These are prioritization / review heuristics, not definitive truth labels.
-They are intended to help you triage candidates for manual review and
-downstream interpretation.
+annotated harmonized junctions and clusters, including dedicated fusion events.
 """
 
 from __future__ import annotations
 
-from schema import InterpretedEvent
+from schema import FusionEvent, InterpretedEvent
 
 
-def interpret_junctions(sample: str, junctions) -> list[InterpretedEvent]:
-    """
-    Interpret individual junctions into candidate event types.
-    """
-    events: list[InterpretedEvent] = []
+def _location_summary(chrom1: str, pos1: int, chrom2: str, pos2: int) -> str:
+    if chrom1 == chrom2:
+        lo, hi = sorted((pos1, pos2))
+        return f"{chrom1}:{lo}-{hi}"
+    return f"{chrom1}:{pos1} <-> {chrom2}:{pos2}"
+
+
+def _confidence_from_callers(caller_count: int, supporting_reads: int | None) -> str:
+    if caller_count >= 3:
+        return "high"
+    if caller_count == 2:
+        return "medium"
+    if supporting_reads is not None and supporting_reads >= 8:
+        return "medium"
+    return "low"
+
+
+def _fusion_candidates(sample: str, junctions) -> tuple[list[FusionEvent], list[InterpretedEvent]]:
+    fusion_events: list[FusionEvent] = []
+    interpreted: list[InterpretedEvent] = []
     event_index = 1
 
     for j in junctions:
         genes1 = j.annotations.get("genes_side1", [])
         genes2 = j.annotations.get("genes_side2", [])
+        if not genes1 or not genes2:
+            continue
 
-        exons1 = j.annotations.get("exons_side1", [])
-        exons2 = j.annotations.get("exons_side2", [])
+        left_genes = sorted({g.split("|")[0] for g in genes1})
+        right_genes = sorted({g.split("|")[0] for g in genes2})
+        if set(left_genes) == set(right_genes):
+            continue
 
-        promoters1 = j.annotations.get("promoters_side1", [])
-        promoters2 = j.annotations.get("promoters_side2", [])
+        gene1 = left_genes[0]
+        gene2 = right_genes[0]
+        label = f"{gene1}--{gene2}"
+        confidence = _confidence_from_callers(j.caller_count, j.supporting_reads)
+        location_summary = _location_summary(j.chrom1, j.pos1, j.chrom2, j.pos2)
+        fusion_id = f"FUSION_{event_index:06d}"
 
-        enhancers1 = j.annotations.get("enhancers_side1", [])
-        enhancers2 = j.annotations.get("enhancers_side2", [])
+        fusion = FusionEvent(
+            fusion_id=fusion_id,
+            sample=sample,
+            gene1=gene1,
+            gene2=gene2,
+            chrom1=j.chrom1,
+            pos1=j.pos1,
+            chrom2=j.chrom2,
+            pos2=j.pos2,
+            orientation=f"{j.strand1 or '?'}{j.strand2 or '?'}",
+            svtype=j.svtype,
+            junction_ids=[j.junction_id],
+            supporting_callers=list(j.callers),
+            support_by_caller=dict(j.support_by_caller),
+            caller_count=j.caller_count,
+            supporting_reads=j.supporting_reads,
+            covering_reads=j.covering_reads,
+            non_supporting_reads=j.non_supporting_reads,
+            affected_exons=list(j.affected_exons),
+            affected_genes=list(j.affected_genes),
+            location_summary=location_summary,
+            confidence=confidence,
+            details={
+                "genes_side1": left_genes,
+                "genes_side2": right_genes,
+                "chrom_pair": j.chrom_pair,
+                "interchromosomal": j.is_interchromosomal,
+                "event_region1": j.event_region1,
+                "event_region2": j.event_region2,
+            },
+        )
+        fusion_events.append(fusion)
 
-        # Candidate gene fusion: both sides touch genes and not the exact same set.
-        if genes1 and genes2 and set(genes1) != set(genes2):
+        interpreted.append(
+            InterpretedEvent(
+                event_id=fusion_id,
+                event_type="fusion_event",
+                sample=sample,
+                event_label=label,
+                junction_ids=[j.junction_id],
+                location_summary=location_summary,
+                genes=sorted(set(left_genes + right_genes)),
+                affected_genes=list(j.affected_genes),
+                supporting_callers=list(j.callers),
+                support_by_caller=dict(j.support_by_caller),
+                supporting_reads=j.supporting_reads,
+                covering_reads=j.covering_reads,
+                non_supporting_reads=j.non_supporting_reads,
+                details={
+                    "fusion_id": fusion_id,
+                    "gene1": gene1,
+                    "gene2": gene2,
+                    "orientation": fusion.orientation,
+                    "affected_exons": list(j.affected_exons),
+                },
+                confidence=confidence,
+            )
+        )
+        event_index += 1
+
+    return fusion_events, interpreted
+
+
+def interpret_junctions(sample: str, junctions) -> tuple[list[FusionEvent], list[InterpretedEvent]]:
+    fusion_events, events = _fusion_candidates(sample, junctions)
+    event_index = 1
+
+    for j in junctions:
+        genes = list(j.affected_genes)
+        location_summary = _location_summary(j.chrom1, j.pos1, j.chrom2, j.pos2)
+        confidence = _confidence_from_callers(j.caller_count, j.supporting_reads)
+
+        if j.affected_exons:
             events.append(
                 InterpretedEvent(
-                    event_id=f"EVT_{event_index:06d}",
-                    event_type="fusion_candidate",
+                    event_id=f"EXON_{event_index:06d}",
+                    event_type="exon_interfering_sv",
                     sample=sample,
+                    event_label="exon_interference",
                     junction_ids=[j.junction_id],
-                    genes=sorted(set(genes1 + genes2)),
+                    location_summary=location_summary,
+                    genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(j.callers),
+                    support_by_caller=dict(j.support_by_caller),
+                    supporting_reads=j.supporting_reads,
+                    covering_reads=j.covering_reads,
+                    non_supporting_reads=j.non_supporting_reads,
                     details={
-                        "genes_side1": genes1,
-                        "genes_side2": genes2,
                         "svtype": j.svtype,
-                        "chrom_pair": j.chrom_pair,
+                        "affected_exons": list(j.affected_exons),
+                        "event_region1": j.event_region1,
+                        "event_region2": j.event_region2,
                     },
-                    confidence=j.confidence,
+                    confidence=confidence,
                 )
             )
             event_index += 1
 
-        # Exon disruption: one or both breakends land in exons.
-        if exons1 or exons2:
+        if (j.annotations.get("promoters_side1") and j.annotations.get("genes_side2")) or (
+            j.annotations.get("promoters_side2") and j.annotations.get("genes_side1")
+        ):
             events.append(
                 InterpretedEvent(
-                    event_id=f"EVT_{event_index:06d}",
-                    event_type="exon_disruption",
-                    sample=sample,
-                    junction_ids=[j.junction_id],
-                    genes=sorted(set(genes1 + genes2)),
-                    details={
-                        "exons_side1": exons1,
-                        "exons_side2": exons2,
-                        "svtype": j.svtype,
-                    },
-                    confidence=j.confidence,
-                )
-            )
-            event_index += 1
-
-        # Promoter hijack candidate: promoter on one side, gene on the other.
-        if (promoters1 and genes2) or (promoters2 and genes1):
-            events.append(
-                InterpretedEvent(
-                    event_id=f"EVT_{event_index:06d}",
+                    event_id=f"PROM_{event_index:06d}",
                     event_type="promoter_hijack_candidate",
                     sample=sample,
+                    event_label="promoter_hijack",
                     junction_ids=[j.junction_id],
-                    genes=sorted(set(genes1 + genes2)),
+                    location_summary=location_summary,
+                    genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(j.callers),
+                    support_by_caller=dict(j.support_by_caller),
+                    supporting_reads=j.supporting_reads,
                     details={
-                        "promoters_side1": promoters1,
-                        "promoters_side2": promoters2,
-                        "genes_side1": genes1,
-                        "genes_side2": genes2,
+                        "promoters": list(j.affected_promoters),
+                        "genes_side1": j.annotations.get("genes_side1", []),
+                        "genes_side2": j.annotations.get("genes_side2", []),
                     },
-                    confidence=j.confidence,
+                    confidence=confidence,
                 )
             )
             event_index += 1
 
-        # Enhancer hijack candidate: enhancer on one side, gene on the other.
-        if (enhancers1 and genes2) or (enhancers2 and genes1):
+        if (j.annotations.get("enhancers_side1") and j.annotations.get("genes_side2")) or (
+            j.annotations.get("enhancers_side2") and j.annotations.get("genes_side1")
+        ):
             events.append(
                 InterpretedEvent(
-                    event_id=f"EVT_{event_index:06d}",
+                    event_id=f"ENH_{event_index:06d}",
                     event_type="enhancer_hijack_candidate",
                     sample=sample,
+                    event_label="enhancer_hijack",
                     junction_ids=[j.junction_id],
-                    genes=sorted(set(genes1 + genes2)),
+                    location_summary=location_summary,
+                    genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(j.callers),
+                    support_by_caller=dict(j.support_by_caller),
+                    supporting_reads=j.supporting_reads,
                     details={
-                        "enhancers_side1": enhancers1,
-                        "enhancers_side2": enhancers2,
-                        "genes_side1": genes1,
-                        "genes_side2": genes2,
+                        "enhancers": list(j.affected_enhancers),
+                        "genes_side1": j.annotations.get("genes_side1", []),
+                        "genes_side2": j.annotations.get("genes_side2", []),
                     },
-                    confidence=j.confidence,
+                    confidence=confidence,
                 )
             )
             event_index += 1
 
-        # Generic interchromosomal rearrangement.
         if j.is_interchromosomal:
             events.append(
                 InterpretedEvent(
-                    event_id=f"EVT_{event_index:06d}",
+                    event_id=f"CTX_{event_index:06d}",
                     event_type="interchromosomal_rearrangement",
                     sample=sample,
+                    event_label="interchromosomal_event",
                     junction_ids=[j.junction_id],
-                    genes=sorted(set(genes1 + genes2)),
+                    location_summary=location_summary,
+                    genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(j.callers),
+                    support_by_caller=dict(j.support_by_caller),
+                    supporting_reads=j.supporting_reads,
                     details={
                         "chrom_pair": j.chrom_pair,
                         "svtype": j.svtype,
                     },
-                    confidence=j.confidence,
+                    confidence=confidence,
+                )
+            )
+            event_index += 1
+        elif j.svtype == "DEL" and len(j.affected_genes) >= 1:
+            events.append(
+                InterpretedEvent(
+                    event_id=f"DEL_{event_index:06d}",
+                    event_type="large_deletion",
+                    sample=sample,
+                    event_label="large_deletion",
+                    junction_ids=[j.junction_id],
+                    location_summary=location_summary,
+                    genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(j.callers),
+                    support_by_caller=dict(j.support_by_caller),
+                    supporting_reads=j.supporting_reads,
+                    details={
+                        "svtype": j.svtype,
+                        "affected_genes": list(j.affected_genes),
+                        "event_region1": j.event_region1,
+                        "event_region2": j.event_region2,
+                    },
+                    confidence=confidence,
                 )
             )
             event_index += 1
 
-    return events
+    return fusion_events, events
 
 
 def interpret_clusters(sample: str, clusters) -> list[InterpretedEvent]:
-    """
-    Interpret clusters into larger-scale complex-event candidates.
-    """
     events: list[InterpretedEvent] = []
     event_index = 1
 
     for c in clusters:
-        genes = c.annotations.get("genes", [])
+        genes = list(c.affected_genes)
+        location_summary = "; ".join(
+            f"{chrom}:{span[0]}-{span[1]}" for chrom, span in sorted(c.event_span_by_chrom.items())
+        )
 
-        # Simple chromothripsis-like heuristic:
-        # many junctions, relatively few chromosomes.
         if c.junction_count >= 8 and len(c.chromosomes) <= 3:
             events.append(
                 InterpretedEvent(
-                    event_id=f"CLUSTEVT_{event_index:06d}",
+                    event_id=f"CLUST_{event_index:06d}",
                     event_type="chromothripsis_like_cluster",
                     sample=sample,
+                    event_label="chromothripsis_like_cluster",
                     cluster_id=c.cluster_id,
                     junction_ids=c.junction_ids,
+                    location_summary=location_summary,
                     genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(c.caller_set),
                     details={
                         "junction_count": c.junction_count,
                         "chromosomes": c.chromosomes,
@@ -183,17 +285,19 @@ def interpret_clusters(sample: str, clusters) -> list[InterpretedEvent]:
                 )
             )
             event_index += 1
-
-        # Generic complex rearrangement cluster.
         elif c.junction_count >= 5:
             events.append(
                 InterpretedEvent(
-                    event_id=f"CLUSTEVT_{event_index:06d}",
+                    event_id=f"CLUST_{event_index:06d}",
                     event_type="complex_rearrangement_cluster",
                     sample=sample,
+                    event_label="complex_rearrangement_cluster",
                     cluster_id=c.cluster_id,
                     junction_ids=c.junction_ids,
+                    location_summary=location_summary,
                     genes=genes,
+                    affected_genes=genes,
+                    supporting_callers=list(c.caller_set),
                     details={
                         "junction_count": c.junction_count,
                         "chromosomes": c.chromosomes,
