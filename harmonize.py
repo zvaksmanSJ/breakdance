@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 from collections import defaultdict
 from statistics import median
+
 from schema import HarmonizedJunction, RawSVCall
+
 
 def canonicalize_call(call: RawSVCall) -> RawSVCall:
     left = (call.chrom1, call.pos1)
@@ -25,10 +28,16 @@ def canonicalize_call(call: RawSVCall) -> RawSVCall:
         filt=call.filt,
         source_path=call.source_path,
         sample_name=call.sample_name,
-        info=call.info,
+        ref=call.ref,
+        alt=call.alt,
+        filter_status=call.filter_status,
+        event_length=call.event_length,
+        annotations=dict(call.annotations),
+        info=dict(call.info),
         adaptive_local_density_hint=call.adaptive_local_density_hint,
         adaptive_hotspot_hint=call.adaptive_hotspot_hint,
     )
+
 
 def compatible_svtypes(a: str, b: str) -> bool:
     if a == b:
@@ -36,6 +45,7 @@ def compatible_svtypes(a: str, b: str) -> bool:
     if {a, b} <= {"BND"}:
         return True
     return False
+
 
 def calls_match(a: RawSVCall, b: RawSVCall, tolerance_bp: int) -> bool:
     if not compatible_svtypes(a.svtype, b.svtype):
@@ -46,17 +56,21 @@ def calls_match(a: RawSVCall, b: RawSVCall, tolerance_bp: int) -> bool:
         return False
     if abs(a.pos2 - b.pos2) > tolerance_bp:
         return False
+    if a.strand1 and b.strand1 and a.strand1 != b.strand1:
+        return False
+    if a.strand2 and b.strand2 and a.strand2 != b.strand2:
+        return False
     return True
 
-def annotate_density_hints(raw_calls: list[RawSVCall], window_bp: int = 1000000) -> list[RawSVCall]:
+
+def annotate_density_hints(raw_calls: list[RawSVCall], window_bp: int = 1_000_000) -> list[RawSVCall]:
     by_chrom = defaultdict(list)
     for idx, call in enumerate(raw_calls):
         by_chrom[call.chrom1].append((call.pos1, idx))
         by_chrom[call.chrom2].append((call.pos2, idx))
 
     density_scores = [0.0] * len(raw_calls)
-
-    for chrom, entries in by_chrom.items():
+    for entries in by_chrom.values():
         entries.sort()
         positions = [x[0] for x in entries]
         left = 0
@@ -74,14 +88,14 @@ def annotate_density_hints(raw_calls: list[RawSVCall], window_bp: int = 1000000)
     for i, call in enumerate(raw_calls):
         call.adaptive_local_density_hint = density_scores[i]
         call.adaptive_hotspot_hint = density_scores[i] >= hotspot_threshold and density_scores[i] > 0
-
     return raw_calls
+
 
 def harmonize_calls(raw_calls: list[RawSVCall], tolerance_bp: int = 100) -> list[HarmonizedJunction]:
     canon_calls = [canonicalize_call(c) for c in raw_calls]
     canon_calls.sort(key=lambda x: (x.chrom1, x.pos1, x.chrom2, x.pos2, x.svtype, x.caller))
 
-    groups = []
+    groups: list[list[RawSVCall]] = []
     for call in canon_calls:
         placed = False
         for group in groups:
@@ -101,7 +115,7 @@ def harmonize_calls(raw_calls: list[RawSVCall], tolerance_bp: int = 100) -> list
         qual_by_caller = {c.caller: c.qual for c in group}
         filters_by_caller = {c.caller: c.filt for c in group}
         raw_call_ids = [f"{c.caller}:{c.record_id}" for c in group]
-        source_files = sorted({str(c.source_path) for c in group})
+        source_files = sorted({str(c.source_path) for c in group if c.source_path})
         median_support = median(supports) if supports else None
         caller_count = len(callers)
 
@@ -116,6 +130,10 @@ def harmonize_calls(raw_calls: list[RawSVCall], tolerance_bp: int = 100) -> list
         density_scores = [c.adaptive_local_density_hint for c in group if c.adaptive_local_density_hint is not None]
         density_score = max(density_scores) if density_scores else None
         hotspot_cluster = any(bool(c.adaptive_hotspot_hint) for c in group)
+        supporting_reads = max(supports) if supports else None
+        event_type = rep.svtype
+        region1 = f"{rep.chrom1}:{min(c.pos1 for c in group)}-{max(c.pos1 for c in group)}"
+        region2 = f"{rep.chrom2}:{min(c.pos2 for c in group)}-{max(c.pos2 for c in group)}"
 
         harmonized.append(
             HarmonizedJunction(
@@ -125,6 +143,8 @@ def harmonize_calls(raw_calls: list[RawSVCall], tolerance_bp: int = 100) -> list
                 pos1=round(sum(c.pos1 for c in group) / len(group)),
                 chrom2=rep.chrom2,
                 pos2=round(sum(c.pos2 for c in group) / len(group)),
+                strand1=rep.strand1,
+                strand2=rep.strand2,
                 callers=callers,
                 raw_call_ids=raw_call_ids,
                 support_by_caller=support_by_caller,
@@ -138,6 +158,10 @@ def harmonize_calls(raw_calls: list[RawSVCall], tolerance_bp: int = 100) -> list
                 is_interchromosomal=(rep.chrom1 != rep.chrom2),
                 adaptive_hotspot_cluster=hotspot_cluster,
                 adaptive_density_score=density_score,
+                consensus_event_type=event_type,
+                event_region1=region1,
+                event_region2=region2,
+                supporting_reads=supporting_reads,
             )
         )
     return harmonized
