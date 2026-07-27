@@ -12,7 +12,6 @@ coverage-derived context rather than full breakpoint-spanning read validation.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
 
 try:
     import pysam  # type: ignore

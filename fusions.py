@@ -10,10 +10,19 @@ from __future__ import annotations
 from collections import defaultdict
 
 
+FUSION_BIN_BP = 1_000
+
+
+def _bin_pos(pos: int) -> int:
+    return int(pos) // FUSION_BIN_BP
+
+
 def _fusion_key(fusion):
     genes = tuple(sorted([fusion.gene1, fusion.gene2]))
     chroms = tuple(sorted([fusion.chrom1, fusion.chrom2]))
-    return genes, chroms
+    pos_bins = tuple(sorted([_bin_pos(fusion.pos1), _bin_pos(fusion.pos2)]))
+    orientation = fusion.orientation or "??"
+    return genes, chroms, pos_bins, orientation
 
 
 def consolidate_fusions(fusions):
@@ -43,6 +52,9 @@ def consolidate_fusions(fusions):
         best.support_by_caller = support_by_caller
         best.affected_exons = sorted({x for f in group for x in f.affected_exons})
         best.affected_genes = sorted({x for f in group for x in f.affected_genes})
+        best.details = dict(best.details)
+        best.details["consolidated_fusion_count"] = len(group)
+        best.details["fusion_bin_bp"] = FUSION_BIN_BP
         consolidated.append(best)
 
     consolidated.sort(key=lambda f: (-float(f.priority_score), f.fusion_label, f.fusion_id))
