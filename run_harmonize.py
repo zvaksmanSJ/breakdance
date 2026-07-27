@@ -10,10 +10,16 @@ Main CLI entrypoint for the Breakdance Version 1 ONT SV interpretation pipeline.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
 from annotate import annotate_clusters, annotate_junctions
+from clinical_report import (
+    write_clinical_summary_html,
+    write_clinical_summary_json,
+    write_clinical_summary_tsv,
+)
 from clustering import cluster_junctions
 from coverage import attach_read_evidence, propagate_read_evidence_to_events, propagate_read_evidence_to_fusions
 from figures import attach_cluster_figures, attach_event_figures, attach_fusion_figures
@@ -21,6 +27,7 @@ from fusions import consolidate_fusions
 from graph import build_breakpoint_graph
 from harmonize import annotate_density_hints, harmonize_calls
 from interpret import interpret_clusters, interpret_junctions
+from lsf import write_lsf_launcher
 from report import (
     write_clusters_tsv,
     write_dashboard_json,
@@ -97,6 +104,9 @@ def write_summary_tsv(out_path: Path, rows: list[dict[str, str]]) -> None:
         "graph_json",
         "dashboard_json",
         "figures_manifest_tsv",
+        "clinical_tsv",
+        "clinical_json",
+        "clinical_html",
     ]
 
     with out_path.open("w") as out:
@@ -119,11 +129,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--focus-genes", default="", help="Comma-separated gene list used to boost event ranking")
     parser.add_argument("--figure-dir", default=None, help="Optional directory for placeholder event/fusion/cluster figures")
     parser.add_argument("--coverage-window-bp", type=int, default=250, help="Window used for optional local coverage estimation")
+    parser.add_argument("--write-lsf-template", default=None, help="Optional path to write an example LSF launcher script and exit")
     return parser.parse_args()
+
+
+def _build_command_from_args() -> str:
+    return "python " + " ".join(shlex.quote(arg) for arg in sys.argv)
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.write_lsf_template:
+        script_path = write_lsf_launcher(args.write_lsf_template, _build_command_from_args())
+        log(f"Wrote LSF launcher template: {script_path}")
+        return
+
     bam_paths = load_bam_list(Path(args.bam_list))
     summary_rows: list[dict[str, str]] = []
 
@@ -163,6 +184,9 @@ def main() -> None:
                     "graph_json": "",
                     "dashboard_json": "",
                     "figures_manifest_tsv": "",
+                    "clinical_tsv": "",
+                    "clinical_json": "",
+                    "clinical_html": "",
                 }
             )
             continue
@@ -210,6 +234,9 @@ def main() -> None:
         graph_json = sample_output_dir / f"{sample}.breakpoint_graph.json"
         dashboard_json = sample_output_dir / f"{sample}.dashboard.json"
         figures_manifest_tsv = sample_output_dir / f"{sample}.figures_manifest.tsv"
+        clinical_tsv = sample_output_dir / f"{sample}.oncoseq_sv_summary.tsv"
+        clinical_json = sample_output_dir / f"{sample}.oncoseq_sv_summary.json"
+        clinical_html = sample_output_dir / f"{sample}.clinical_summary.html"
 
         write_harmonized_tsv(harmonized_tsv, junctions)
         write_clusters_tsv(clusters_tsv, clusters)
@@ -218,6 +245,9 @@ def main() -> None:
         write_graph_json(graph_json, graph)
         write_figures_manifest_tsv(figures_manifest_tsv, sample, events, fusion_events)
         write_dashboard_json(dashboard_json, sample, junctions, clusters, events, graph, fusions=fusion_events)
+        write_clinical_summary_tsv(clinical_tsv, sample, events, fusion_events)
+        write_clinical_summary_json(clinical_json, sample, junctions, clusters, events, fusion_events, graph)
+        write_clinical_summary_html(clinical_html, sample, junctions, clusters, events, fusion_events, graph)
 
         largest_cluster = max((c.junction_count for c in clusters), default=0)
         summary_rows.append(
@@ -239,6 +269,9 @@ def main() -> None:
                 "graph_json": str(graph_json),
                 "dashboard_json": str(dashboard_json),
                 "figures_manifest_tsv": str(figures_manifest_tsv),
+                "clinical_tsv": str(clinical_tsv),
+                "clinical_json": str(clinical_json),
+                "clinical_html": str(clinical_html),
             }
         )
 

@@ -2,7 +2,7 @@
 
 **Breakdance** is a starter ONT structural variant interpretation pipeline for long-read structural variant callsets.
 
-It harmonizes structural variant VCFs from **Sniffles2**, **cuteSV**, and **SVIM** into richer breakpoint-, event-, fusion-, cluster-, and graph-level outputs.
+It harmonizes structural variant VCFs from **Sniffles2**, **cuteSV**, and **SVIM** into richer breakpoint-, event-, fusion-, cluster-, graph-, and clinical-review-level outputs.
 
 ## Current workflow
 
@@ -16,6 +16,7 @@ For each sample, Breakdance can now:
 - export an enriched breakpoint graph
 - optionally estimate local breakpoint coverage from BAMs
 - optionally create placeholder figure artifacts for downstream review
+- generate analyst-facing TSV/JSON/HTML clinical summaries
 - write per-sample TSV and JSON outputs plus a cohort summary
 
 ## Main modules
@@ -28,18 +29,26 @@ For each sample, Breakdance can now:
 - `score.py` — event and fusion prioritization
 - `graph.py` — enriched breakpoint graph export
 - `report.py` — TSV/JSON writers
+- `clinical_report.py` — analyst-facing TSV/JSON/HTML clinical summaries
 - `coverage.py` — optional local BAM coverage evidence
 - `fusions.py` — fusion consolidation helpers
 - `figures.py` — placeholder figure generation
 - `lsf.py` — lightweight LSF launcher helper
 - `run_harmonize.py` — end-to-end CLI entrypoint
 - `setup_references.py` — reference/annotation preparation
+- `install_breakdance.sh` — setup helper
+- `example_run_breakdance.sh` — example execution wrapper
 
 ## Requirements
 Core pipeline uses the Python standard library plus:
 - `pysam` for optional BAM-based local coverage estimation
 
 Install:
+```bash
+bash install_breakdance.sh
+```
+
+Or manually:
 ```bash
 pip install -r requirements.txt
 ```
@@ -67,7 +76,22 @@ python run_harmonize.py \
   --summary-dir harmonized_summary
 ```
 
-## Key outputs per sample
+## Clinical-style outputs
+Per sample, Breakdance now writes:
+- `<sample>.oncoseq_sv_summary.tsv`
+- `<sample>.oncoseq_sv_summary.json`
+- `<sample>.clinical_summary.html`
+
+The HTML report is self-contained and includes:
+- sample summary
+- clinical event summary
+- fusion table
+- harmonized junction table
+- cluster table
+- graph summary
+- evidence, confidence, and priority fields
+
+## Standard outputs per sample
 - `<sample>.harmonized_breakpoints.tsv`
 - `<sample>.junction_clusters.tsv`
 - `<sample>.fusion_events.tsv`
@@ -75,6 +99,25 @@ python run_harmonize.py \
 - `<sample>.breakpoint_graph.json`
 - `<sample>.dashboard.json`
 - `<sample>.figures_manifest.tsv`
+
+## Setup helpers
+Example setup:
+```bash
+bash install_breakdance.sh
+```
+
+Example run script:
+```bash
+bash example_run_breakdance.sh
+```
+
+Optional LSF template generation:
+```bash
+python run_harmonize.py \
+  --bam-list /path/to/bams_to_run.txt \
+  --summary-dir harmonized_summary \
+  --write-lsf-template breakdance.lsf
+```
 
 ## Notes and limitations
 - coverage fields are approximate local depth estimates, not full breakpoint-spanning read validation
